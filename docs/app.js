@@ -146,6 +146,10 @@ async function deletePlayer(code, uid) {
   await deleteDoc(playerRef(code, uid));
 }
 
+async function renamePlayer(code, uid, name) {
+  await updateDoc(playerRef(code, uid), { name });
+}
+
 async function fetchGameWithPlayers(code) {
   const upperCode = code.toUpperCase();
   const snap = await getDoc(gameRef(upperCode));
@@ -795,11 +799,7 @@ function renderRoom() {
               ? `<div class="row-actions">
                    <button class="row-action-btn" data-action="buyin" data-uid="${p.uid}">+ Buy-in</button>
                    ${!hasCashedOut(p) ? `<button class="row-action-btn" data-action="cashout" data-uid="${p.uid}">✓ Cash out</button>` : ""}
-                   ${
-                     p.buyIns.length || hasCashedOut(p)
-                       ? `<button class="row-action-btn ghost" data-action="edit" data-uid="${p.uid}">✎ Edit</button>`
-                       : ""
-                   }
+                   <button class="row-action-btn ghost" data-action="edit" data-uid="${p.uid}">✎ Edit</button>
                    ${deletable ? `<button class="row-action-btn danger" data-action="delete" data-uid="${p.uid}">🗑 Delete</button>` : ""}
                  </div>`
               : ""
@@ -977,8 +977,11 @@ function openCashOutSheet(player) {
 
 function openEditSheet(player) {
   const items = [
-    ...player.buyIns.map((b) => ({ label: "Buy-in", amount: b.amount, field: "buyIn", buyInId: b.id })),
-    ...(hasCashedOut(player) ? [{ label: "Cash-out", amount: player.cashOut, field: "cashOut", buyInId: null }] : []),
+    { label: "Name", display: player.name, field: "name", buyInId: null },
+    ...player.buyIns.map((b) => ({ label: "Buy-in", display: money(b.amount), amount: b.amount, field: "buyIn", buyInId: b.id })),
+    ...(hasCashedOut(player)
+      ? [{ label: "Cash-out", display: money(player.cashOut), amount: player.cashOut, field: "cashOut", buyInId: null }]
+      : []),
   ];
 
   openSheet(`
@@ -989,13 +992,13 @@ function openEditSheet(player) {
           (item, idx) => `
         <button class="edit-item" data-idx="${idx}">
           <span>${item.label}</span>
-          <span class="edit-item-amount">${money(item.amount)}</span>
+          <span class="edit-item-amount">${escapeHtml(item.display)}</span>
         </button>`
         )
         .join("")}
     </div>
     <div id="edit-amount-step" hidden>
-      <label class="field-label">New amount</label>
+      <label class="field-label" id="edit-field-label">New amount</label>
       <div id="amount-input"></div>
       <p class="sheet-error" id="sheet-error"></p>
       <div class="sheet-actions">
@@ -1014,9 +1017,36 @@ function contentSheetItems(items, player) {
     btn.onclick = () => {
       const item = items[Number(btn.dataset.idx)];
       document.querySelector(".edit-item-list").hidden = true;
-      document.querySelector(".sheet h2").textContent = `New ${item.label.toLowerCase()} amount`;
+      document.querySelector(".sheet h2").textContent =
+        item.field === "name" ? `Rename ${player.name}` : `New ${item.label.toLowerCase()} amount`;
       const step = document.getElementById("edit-amount-step");
       step.hidden = false;
+
+      if (item.field === "name") {
+        document.getElementById("edit-field-label").textContent = "New name";
+        document.getElementById("amount-input").innerHTML =
+          `<input class="field" id="edit-name-input" type="text" maxlength="30" value="${escapeHtml(player.name)}" />`;
+
+        document.getElementById("sheet-submit").onclick = async (e) => {
+          const errorEl = document.getElementById("sheet-error");
+          const newName = document.getElementById("edit-name-input").value.trim();
+          if (!newName) {
+            errorEl.textContent = "Enter a name.";
+            return;
+          }
+          e.currentTarget.disabled = true;
+          try {
+            await renamePlayer(state.code, player.uid, newName);
+            closeSheet();
+          } catch (err) {
+            errorEl.textContent = err.message;
+            e.currentTarget.disabled = false;
+          }
+        };
+        return;
+      }
+
+      document.getElementById("edit-field-label").textContent = "New amount";
       const amountCtl = mountAmountInput(document.getElementById("amount-input"), {
         chipsPerDollar,
         initialDollars: item.amount,
