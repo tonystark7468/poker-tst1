@@ -82,7 +82,16 @@
     flex-shrink: 0;
   }
 
-  .topbar-title { flex: 1; min-width: 0; }
+  .topbar-title {
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: none;
+    text-align: left;
+    font: inherit;
+    padding: 0;
+    cursor: pointer;
+  }
   .topbar-title .code-text {
     display: block;
     font-family: "SF Mono", Menlo, monospace;
@@ -444,6 +453,78 @@
   }
 
   .settlement-sheet { max-height: 92vh; }
+
+  /* ---------------- invite / QR ---------------- */
+
+  .qr-wrap {
+    display: flex;
+    justify-content: center;
+    margin: 1rem 0.95rem 0;
+    background: #fff;
+    border-radius: 0.7rem;
+    padding: 1rem;
+  }
+  .qr-wrap svg { width: 100%; max-width: 220px; height: auto; }
+  .code-display {
+    text-align: center;
+    font-family: "SF Mono", Menlo, monospace;
+    font-weight: 700;
+    font-size: 1.4rem;
+    letter-spacing: 0.08em;
+    margin: 0.8rem 0 0;
+  }
+
+  /* ---------------- saved regulars ---------------- */
+
+  .chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0 0.95rem;
+  }
+  .name-chip {
+    font-size: 0.82rem;
+    font-weight: 600;
+    padding: 0.4rem 0.75rem;
+    border-radius: 999px;
+    border: 1px solid var(--hairline);
+    background: var(--card);
+    color: var(--accent);
+  }
+
+  /* ---------------- activity log ---------------- */
+
+  .activity-toggle-btn {
+    display: block;
+    width: calc(100% - 1.8rem);
+    margin: 0.9rem auto 0;
+  }
+  .activity-row {
+    padding: 0.6rem 0.95rem;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .activity-row:last-child { border-bottom: none; }
+  .activity-text { font-size: 0.84rem; line-height: 1.35; }
+  .activity-time { font-size: 0.7rem; color: var(--secondary); margin-top: 0.1rem; }
+
+  /* ---------------- blinds timer ---------------- */
+
+  .timer-card {
+    background: var(--card);
+    margin: 0 0.9rem;
+    border-radius: 0.8rem;
+    box-shadow: 0 0 0 1px var(--hairline);
+    padding: 1rem;
+    text-align: center;
+  }
+  .timer-time {
+    font-family: "SF Mono", Menlo, monospace;
+    font-weight: 700;
+    font-size: 2rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .timer-blinds { font-size: 0.8rem; color: var(--secondary); margin-top: 0.2rem; }
+  .timer-card .btn { margin-top: 0.8rem; }
 </style>
 </head>
 <body>
@@ -454,6 +535,7 @@
   <nav id="tabbar"></nav>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 <script type="module" src="app.js"></script>
 </body>
 </html>
