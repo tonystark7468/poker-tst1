@@ -220,15 +220,40 @@
 
   .game-status {
     display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.9rem 1rem 0.2rem;
+  }
+  .game-status-left {
+    display: flex;
     align-items: center;
     gap: 0.4rem;
-    padding: 0.9rem 1rem 0.2rem;
     font-size: 0.82rem;
     font-weight: 600;
     color: var(--secondary);
   }
-  .status-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--secondary); }
+  .status-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--secondary); flex-shrink: 0; }
   .status-dot.live { background: var(--green); }
+
+  .pot-summary {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    flex-shrink: 0;
+    text-align: right;
+  }
+  .pot-summary-dollar {
+    font-weight: 700;
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+  }
+  .pot-summary-chips {
+    font-size: 0.7rem;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
 
   .tx-row {
     display: flex;
