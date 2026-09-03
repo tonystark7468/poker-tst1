@@ -1046,7 +1046,24 @@ function renderRoom() {
       setError(`Still in play: ${stillIn.map((p) => p.name).join(", ")}`);
       return;
     }
-    if (confirm("End the game for everyone? This locks in all buy-ins and cash-outs.")) {
+
+    // Every dollar bought in should come back out as somebody's cash-out —
+    // if it doesn't, a cash-out was probably mistyped. This is a warning,
+    // not a block: the host can still end anyway and fix it later (Edit,
+    // or Reopen Game once ended), since sometimes the "mistake" is real
+    // and everyone at the table already agreed to eat it.
+    const totalBuyInAll = players.reduce((sum, p) => sum + totalBuyIn(p), 0);
+    const totalCashOutAll = players.reduce((sum, p) => sum + (p.cashOut ?? 0), 0);
+    const diff = round2(totalCashOutAll - totalBuyInAll);
+
+    const message =
+      Math.abs(diff) > 0.01
+        ? `Buy-ins and cash-outs don't match: ${money(totalBuyInAll)} bought in vs ${money(
+            totalCashOutAll
+          )} cashed out (off by ${money(Math.abs(diff))}). That usually means a cash-out was mistyped — tap Cancel to go fix it with Edit, or OK to end anyway.\n\nEnd the game for everyone?`
+        : "End the game for everyone? This locks in all buy-ins and cash-outs.";
+
+    if (confirm(message)) {
       const code = state.code;
       endGame(code)
         .then(() => logActivity(code, state.playerName, "Ended the game"))
@@ -1549,6 +1566,8 @@ function renderSettlementOverlay() {
   const players = state.players;
   const transactions = calculateSettlement(players);
   const totalPot = players.reduce((sum, p) => sum + totalBuyIn(p), 0);
+  const totalCashOut = players.reduce((sum, p) => sum + (p.cashOut ?? 0), 0);
+  const discrepancy = round2(totalCashOut - totalPot);
   const sorted = [...players].sort((a, b) => (netOf(b) ?? 0) - (netOf(a) ?? 0));
 
   const overlay = document.createElement("div");
@@ -1587,6 +1606,13 @@ function renderSettlementOverlay() {
 
       <div class="card-list">
         <div class="pot-row"><span>Total pot</span><span>${money(totalPot)}</span></div>
+        ${
+          Math.abs(discrepancy) > 0.01
+            ? `<div class="pot-row"><span>Buy-ins vs. cash-outs</span><span style="color:var(--red);font-weight:700;">off by ${money(
+                Math.abs(discrepancy)
+              )} ${discrepancy > 0 ? "extra" : "short"}</span></div>`
+            : ""
+        }
       </div>
 
       <div class="sheet-actions">
@@ -1606,6 +1632,9 @@ function renderSettlementOverlay() {
       ...sorted.map((p) => `${p.name}: ${moneySigned(netOf(p) ?? 0)}`),
       "",
       ...(transactions.length ? transactions.map((tx) => `${tx.from} → ${tx.to}: ${money(tx.amount)}`) : ["Everyone's settled up."]),
+      ...(Math.abs(discrepancy) > 0.01
+        ? ["", `Note: buy-ins and cash-outs were off by ${money(Math.abs(discrepancy))} ${discrepancy > 0 ? "extra" : "short"}.`]
+        : []),
     ];
     const text = lines.join("\n");
     if (navigator.share) {
