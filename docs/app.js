@@ -6,17 +6,23 @@ import {
   signInAnonymously,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
-  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentSingleTabManager,
   doc,
   getDoc,
   setDoc,
   updateDoc,
   deleteDoc,
+  deleteField,
   collection,
   getDocs,
   onSnapshot,
   runTransaction,
   arrayUnion,
+  query,
+  orderBy,
+  limit,
   Timestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
@@ -26,7 +32,12 @@ import {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const db = getFirestore(app);
+// Offline persistence: writes made with a flaky connection (common at a
+// poker table) queue in IndexedDB and sync automatically once back online,
+// instead of silently failing.
+const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({ tabManager: persistentSingleTabManager({}) }),
+});
 
 function ensureSignedIn() {
   return new Promise((resolve, reject) => {
@@ -64,6 +75,7 @@ function generateCode(length = 5) {
 const gameRef = (code) => doc(db, "games", code);
 const playersRef = (code) => collection(db, "games", code, "players");
 const playerRef = (code, uid) => doc(db, "games", code, "players", uid);
+const activityRef = (code) => collection(db, "games", code, "activity");
 
 // ---------------------------------------------------------------------
 // Game service — mirrors PokerTracker/Services/GameService.swift
@@ -139,15 +151,38 @@ async function addManualPlayer(code, name, hostUid) {
   return id;
 }
 
-// Only allowed (client-side and by the security rules) while the player
-// has no buy-ins and hasn't cashed out — otherwise deleting them would
-// silently erase real money from the settlement.
+// The UI only offers this while the player has no buy-ins and hasn't cashed
+// out, so a stray tap can't silently erase real money from the settlement.
+// (Not re-enforced in the security rules — the host can already zero out
+// any amount via update, so this is accident prevention, not a security
+// boundary. "Delete Game" deletes players unconditionally as part of full
+// teardown.)
 async function deletePlayer(code, uid) {
   await deleteDoc(playerRef(code, uid));
 }
 
 async function renamePlayer(code, uid, name) {
   await updateDoc(playerRef(code, uid), { name });
+}
+
+// A visible, read-only record of what happened and who did it — mainly for
+// the non-host viewers, who can watch the numbers change live but (by
+// design) can never cause a change themselves, so this is their only way
+// to see *why* something changed.
+async function logActivity(code, actorName, text) {
+  const id = crypto.randomUUID();
+  await setDoc(doc(activityRef(code), id), {
+    actorName,
+    text,
+    createdAt: Timestamp.now(),
+  });
+}
+
+function listenToActivity(code, onChange) {
+  const q = query(activityRef(code), orderBy("createdAt", "desc"), limit(25));
+  return onSnapshot(q, (snap) => {
+    onChange(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  });
 }
 
 async function fetchGameWithPlayers(code) {
@@ -189,6 +224,72 @@ async function setCashOut(code, uid, amount) {
 
 async function endGame(code) {
   await updateDoc(gameRef(code), { status: "ended", endedAt: Timestamp.now() });
+}
+
+// Undo an accidental End Game tap. The settlement snapshot already saved to
+// local history is stale the moment this happens — enterGame's listener
+// removes it when it sees this transition.
+async function reopenGame(code) {
+  await updateDoc(gameRef(code), { status: "active", endedAt: deleteField() });
+}
+
+async function updateGameSettings(code, { name, defaultBuyIn, chipsPerDollar }) {
+  const data = { name, defaultBuyIn };
+  data.chipsPerDollar = chipsPerDollar ? chipsPerDollar : deleteField();
+  await updateDoc(gameRef(code), data);
+}
+
+async function transferHost(code, newHostUid) {
+  await updateDoc(gameRef(code), { hostId: newHostUid });
+}
+
+// Firestore doesn't cascade-delete subcollections, so the game's players
+// and activity log have to be removed one at a time before the game doc
+// itself can go.
+async function deleteGame(code) {
+  const [playersSnap, activitySnap] = await Promise.all([getDocs(playersRef(code)), getDocs(activityRef(code))]);
+  await Promise.all([
+    ...playersSnap.docs.map((d) => deleteDoc(d.ref)),
+    ...activitySnap.docs.map((d) => deleteDoc(d.ref)),
+  ]);
+  await deleteDoc(gameRef(code));
+}
+
+async function startTimer(code, roundMinutes, startingSmallBlind) {
+  await updateDoc(gameRef(code), {
+    timerStartedAt: Timestamp.now(),
+    timerRoundMinutes: roundMinutes,
+    timerStartingSmallBlind: startingSmallBlind,
+  });
+}
+
+async function resetTimer(code) {
+  await updateDoc(gameRef(code), {
+    timerStartedAt: deleteField(),
+    timerRoundMinutes: deleteField(),
+    timerStartingSmallBlind: deleteField(),
+  });
+}
+
+// Derives the current round/blinds/countdown from a single timestamp field
+// instead of writing to Firestore every second — every device computes the
+// same answer locally from `timerStartedAt`, so this is just math, called
+// once a second by a local setInterval (see renderRoom).
+function computeTimerState(game) {
+  if (!game.timerStartedAt) return null;
+  const roundMs = (game.timerRoundMinutes || 15) * 60 * 1000;
+  const elapsed = Date.now() - game.timerStartedAt.toMillis();
+  const round = Math.max(0, Math.floor(elapsed / roundMs));
+  const remainingMs = roundMs - (elapsed - round * roundMs);
+  const smallBlind = (game.timerStartingSmallBlind || 25) * Math.pow(2, round);
+  return { round: round + 1, remainingMs, smallBlind, bigBlind: smallBlind * 2 };
+}
+
+function formatClock(ms) {
+  const totalSec = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 // Applies a buy-in/cash-out correction to a player's raw Firestore data in
@@ -274,6 +375,20 @@ const ACTIVE_CODE_KEY = "poker.history.activeCode";
 const NAME_KEY = "poker.playerName";
 const LAST_BUYIN_KEY = "poker.lastDefaultBuyIn";
 const LAST_CHIPVALUE_KEY = "poker.lastChipValue";
+const SAVED_PLAYERS_KEY = "poker.savedPlayerNames";
+
+function loadSavedPlayerNames() {
+  try {
+    return JSON.parse(localStorage.getItem(SAVED_PLAYERS_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+function rememberPlayerName(name) {
+  const names = loadSavedPlayerNames().filter((n) => n.toLowerCase() !== name.toLowerCase());
+  names.unshift(name);
+  localStorage.setItem(SAVED_PLAYERS_KEY, JSON.stringify(names.slice(0, 20)));
+}
 
 function loadHistory() {
   try {
@@ -285,6 +400,10 @@ function loadHistory() {
 function saveHistoryEntry(entry) {
   const entries = loadHistory().filter((e) => e.code !== entry.code);
   entries.unshift(entry);
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(entries));
+}
+function removeHistoryEntry(code) {
+  const entries = loadHistory().filter((e) => e.code !== code);
   localStorage.setItem(HISTORY_KEY, JSON.stringify(entries));
 }
 function getActiveCode() {
@@ -413,16 +532,21 @@ const state = {
   playerName: localStorage.getItem(NAME_KEY) || "",
   tab: "play", // 'play' | 'history'
   code: null,
+  pendingJoinCode: null,
   game: null,
   players: [],
+  activity: [],
+  showActivity: false,
   resumeCode: null,
   error: null,
   busy: false,
   unsubGame: null,
   unsubPlayers: null,
+  unsubActivity: null,
   historyEntries: [],
   historyDetail: null,
   showSettlement: false,
+  timerTickId: null,
 };
 
 const contentEl = document.getElementById("content");
@@ -441,8 +565,10 @@ function setError(message) {
 function detachGameListeners() {
   state.unsubGame?.();
   state.unsubPlayers?.();
+  state.unsubActivity?.();
   state.unsubGame = null;
   state.unsubPlayers = null;
+  state.unsubActivity = null;
 }
 
 function enterGame(code) {
@@ -464,10 +590,21 @@ function enterGame(code) {
       // game that's already locked in.
       closeSheet();
     }
+    if (game && game.status === "active" && wasEnded) {
+      // Host reopened the game — the settlement was already committed to
+      // local history at the moment it ended; that snapshot's now stale.
+      removeHistoryEntry(code);
+      state.showSettlement = false;
+      document.getElementById("settlement-overlay")?.remove();
+    }
     render();
   });
   state.unsubPlayers = listenToPlayers(code, (players) => {
     state.players = players;
+    render();
+  });
+  state.unsubActivity = listenToActivity(code, (activity) => {
+    state.activity = activity;
     render();
   });
 
@@ -478,9 +615,13 @@ function leaveGame() {
   const leavingCode = state.code;
   const wasActive = state.game?.status === "active";
   detachGameListeners();
+  clearInterval(state.timerTickId);
+  state.timerTickId = null;
   state.code = null;
   state.game = null;
   state.players = [];
+  state.activity = [];
+  state.showActivity = false;
   state.showSettlement = false;
   if (wasActive && leavingCode) {
     state.resumeCode = leavingCode;
@@ -542,42 +683,20 @@ function render() {
 
 function renderTopbar() {
   if (state.tab === "play" && state.code && state.game) {
+    const isHost = state.game.hostId === state.uid;
     topbarEl.hidden = false;
     topbarEl.innerHTML = `
       <button class="icon-btn" id="btn-leave" aria-label="Back">‹</button>
-      <div class="topbar-title">
+      <button class="topbar-title" id="btn-invite" aria-label="Invite">
         <span class="code-text">${escapeHtml(state.game.code)}</span>
         <span class="topbar-name">${escapeHtml(state.game.name)}</span>
-      </div>
+      </button>
       <div class="topbar-actions">
-        <button class="icon-btn" id="btn-copy" aria-label="Copy code">⧉</button>
-        <button class="icon-btn" id="btn-share" aria-label="Share code">↑</button>
+        ${isHost ? `<button class="icon-btn" id="btn-game-settings" aria-label="Game settings">⚙</button>` : ""}
       </div>`;
     document.getElementById("btn-leave").onclick = leaveGame;
-    document.getElementById("btn-copy").onclick = async () => {
-      try {
-        await navigator.clipboard.writeText(state.game.code);
-      } catch {
-        /* clipboard unavailable, ignore */
-      }
-    };
-    document.getElementById("btn-share").onclick = async () => {
-      const text = `Join my poker game! Code: ${state.game.code}`;
-      if (navigator.share) {
-        try {
-          await navigator.share({ text });
-        } catch {
-          /* user cancelled, ignore */
-        }
-      } else {
-        try {
-          await navigator.clipboard.writeText(text);
-          setError("Copied — paste it wherever you want to share it.");
-        } catch {
-          /* ignore */
-        }
-      }
-    };
+    document.getElementById("btn-invite").onclick = openInviteSheet;
+    document.getElementById("btn-game-settings")?.addEventListener("click", openGameSettingsSheet);
   } else {
     topbarEl.hidden = true;
     topbarEl.innerHTML = "";
@@ -623,6 +742,12 @@ function renderHome() {
           : ""
       }
 
+      ${
+        state.pendingJoinCode
+          ? `<p class="sheet-note">Joining game ${escapeHtml(state.pendingJoinCode)} — enter your name below.</p>`
+          : ""
+      }
+
       ${state.error ? `<p class="error-text">${escapeHtml(state.error)}</p>` : ""}
 
       <div class="home-actions">
@@ -658,8 +783,17 @@ function renderHome() {
     if (nameGiven()) openHostSheet();
   };
   document.getElementById("btn-join").onclick = () => {
-    if (nameGiven()) openJoinSheet();
+    if (!nameGiven()) return;
+    const code = state.pendingJoinCode;
+    state.pendingJoinCode = null;
+    openJoinSheet(code);
   };
+
+  if (state.pendingJoinCode && state.playerName.trim() && !state.resumeCode) {
+    const code = state.pendingJoinCode;
+    state.pendingJoinCode = null;
+    openJoinSheet(code);
+  }
 }
 
 function openHostSheet() {
@@ -732,11 +866,13 @@ function openHostSheet() {
   };
 }
 
-function openJoinSheet() {
+function openJoinSheet(prefillCode) {
   openSheet(`
     <h2>Join Game</h2>
     <label class="field-label" for="sheet-code">Game code</label>
-    <input class="field" id="sheet-code" type="text" placeholder="e.g. PK4X9" maxlength="8" autocapitalize="characters" autocorrect="off" />
+    <input class="field" id="sheet-code" type="text" placeholder="e.g. PK4X9" maxlength="8" autocapitalize="characters" autocorrect="off" value="${escapeHtml(
+      prefillCode || ""
+    )}" />
     <p class="sheet-error" id="sheet-error"></p>
     <div class="sheet-actions">
       <button class="btn outline" data-close>Cancel</button>
@@ -754,6 +890,7 @@ function openJoinSheet() {
     button.disabled = true;
     try {
       const game = await joinGame(code, state.uid, state.playerName);
+      logActivity(game.code, state.playerName, "Joined the game").catch(() => {});
       closeSheet();
       enterGame(game.code);
     } catch (err) {
@@ -810,6 +947,37 @@ function renderRoom() {
 
   const stillIn = players.filter((p) => !hasCashedOut(p));
 
+  const timerState = active ? computeTimerState(game) : null;
+  const timerHtml = !active
+    ? ""
+    : `
+      <div class="section-label">Blinds Timer</div>
+      <div class="timer-card">
+        ${
+          timerState
+            ? `<div class="timer-time" id="timer-clock">${formatClock(timerState.remainingMs)}</div>
+               <div class="timer-blinds" id="timer-blinds">Round ${timerState.round} · Blinds ${timerState.smallBlind}/${timerState.bigBlind}</div>
+               ${isHost ? `<button class="btn outline" id="btn-timer-reset">Reset Timer</button>` : ""}`
+            : isHost
+            ? `<button class="btn outline" id="btn-timer-start">Start Blinds Timer</button>`
+            : `<p class="hint">No timer running</p>`
+        }
+      </div>`;
+
+  const activityHtml = state.activity.length
+    ? state.activity
+        .map(
+          (a) => `
+      <div class="activity-row">
+        <div class="activity-text"><strong>${escapeHtml(a.actorName || "Someone")}</strong> ${escapeHtml(a.text)}</div>
+        <div class="activity-time">${
+          a.createdAt ? new Date(a.createdAt.toMillis()).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : ""
+        }</div>
+      </div>`
+        )
+        .join("")
+    : `<p class="sheet-note" style="padding:0.85rem;">No activity yet.</p>`;
+
   contentEl.innerHTML = `
     <div class="room">
       <div class="game-status">
@@ -821,6 +989,13 @@ function renderRoom() {
       ${isHost && active ? `<button class="btn outline" id="btn-add-player">+ Add Player</button>` : ""}
       <div class="card-list">${rowsHtml}</div>
 
+      ${timerHtml}
+
+      <button class="btn outline activity-toggle-btn" id="btn-toggle-activity" type="button">
+        Activity (${state.activity.length}) ${state.showActivity ? "▴" : "▾"}
+      </button>
+      ${state.showActivity ? `<div class="card-list">${activityHtml}</div>` : ""}
+
       ${state.error ? `<p class="error-text">${escapeHtml(state.error)}</p>` : ""}
 
       ${
@@ -830,6 +1005,7 @@ function renderRoom() {
           : ""
       }
       ${!active ? `<button class="btn primary" id="btn-view-settlement">View Settlement</button>` : ""}
+      ${!active && isHost ? `<button class="btn outline" id="btn-reopen">Reopen Game</button>` : ""}
     </div>`;
 
   contentEl.querySelectorAll('[data-action="buyin"]').forEach((btn) => {
@@ -846,7 +1022,11 @@ function renderRoom() {
       const player = players.find((p) => p.uid === btn.dataset.uid);
       if (!player) return;
       if (confirm(`Remove ${player.name} from the game?`)) {
-        deletePlayer(state.code, player.uid).catch((err) => setError(err.message));
+        const code = state.code;
+        const name = player.name;
+        deletePlayer(code, player.uid)
+          .then(() => logActivity(code, state.playerName, `Removed player "${name}"`))
+          .catch((err) => setError(err.message));
       }
     };
   });
@@ -859,7 +1039,10 @@ function renderRoom() {
       return;
     }
     if (confirm("End the game for everyone? This locks in all buy-ins and cash-outs.")) {
-      endGame(state.code).catch((err) => setError(err.message));
+      const code = state.code;
+      endGame(code)
+        .then(() => logActivity(code, state.playerName, "Ended the game"))
+        .catch((err) => setError(err.message));
     }
   });
 
@@ -868,14 +1051,278 @@ function renderRoom() {
     render();
   });
 
+  document.getElementById("btn-reopen")?.addEventListener("click", () => {
+    const code = state.code;
+    reopenGame(code)
+      .then(() => logActivity(code, state.playerName, "Reopened the game"))
+      .catch((err) => setError(err.message));
+  });
+
+  document.getElementById("btn-toggle-activity")?.addEventListener("click", () => {
+    state.showActivity = !state.showActivity;
+    render();
+  });
+
+  document.getElementById("btn-timer-start")?.addEventListener("click", openTimerSheet);
+  document.getElementById("btn-timer-reset")?.addEventListener("click", () => {
+    if (!confirm("Reset the blinds timer?")) return;
+    const code = state.code;
+    resetTimer(code)
+      .then(() => logActivity(code, state.playerName, "Reset the blinds timer"))
+      .catch((err) => setError(err.message));
+  });
+
+  clearInterval(state.timerTickId);
+  state.timerTickId = null;
+  if (active && game.timerStartedAt) {
+    state.timerTickId = setInterval(() => {
+      const ts = computeTimerState(state.game);
+      const clockEl = document.getElementById("timer-clock");
+      const blindsEl = document.getElementById("timer-blinds");
+      if (!ts || !clockEl) {
+        clearInterval(state.timerTickId);
+        state.timerTickId = null;
+        return;
+      }
+      clockEl.textContent = formatClock(ts.remainingMs);
+      if (blindsEl) blindsEl.textContent = `Round ${ts.round} · Blinds ${ts.smallBlind}/${ts.bigBlind}`;
+    }, 1000);
+  }
+
   if (state.showSettlement && !document.getElementById("settlement-overlay")) {
     renderSettlementOverlay();
   }
 }
 
+function openTimerSheet() {
+  openSheet(`
+    <h2>Start Blinds Timer</h2>
+    <label class="field-label" for="timer-minutes">Minutes per round</label>
+    <input class="field" id="timer-minutes" type="number" inputmode="numeric" value="15" min="1" step="1" />
+    <label class="field-label" for="timer-blind">Starting small blind</label>
+    <input class="field" id="timer-blind" type="number" inputmode="numeric" value="25" min="1" step="1" />
+    <p class="sheet-note">Blinds double each round. Everyone at the table sees the same live countdown.</p>
+    <p class="sheet-error" id="sheet-error"></p>
+    <div class="sheet-actions">
+      <button class="btn outline" data-close>Cancel</button>
+      <button class="btn primary" id="sheet-submit">Start</button>
+    </div>
+  `);
+  document.getElementById("sheet-submit").onclick = async (e) => {
+    const errorEl = document.getElementById("sheet-error");
+    const minutes = parseInt(document.getElementById("timer-minutes").value, 10);
+    const smallBlind = parseInt(document.getElementById("timer-blind").value, 10);
+    if (!isFinite(minutes) || minutes <= 0) {
+      errorEl.textContent = "Enter a valid number of minutes.";
+      return;
+    }
+    if (!isFinite(smallBlind) || smallBlind <= 0) {
+      errorEl.textContent = "Enter a valid starting small blind.";
+      return;
+    }
+    e.currentTarget.disabled = true;
+    try {
+      await startTimer(state.code, minutes, smallBlind);
+      logActivity(state.code, state.playerName, "Started the blinds timer").catch(() => {});
+      closeSheet();
+    } catch (err) {
+      errorEl.textContent = err.message;
+      e.currentTarget.disabled = false;
+    }
+  };
+}
+
+function openInviteSheet() {
+  const code = state.game.code;
+  const joinUrl = `${location.origin}${location.pathname}?code=${code}`;
+
+  let qrHtml = "";
+  try {
+    const qr = qrcode(0, "M");
+    qr.addData(joinUrl);
+    qr.make();
+    qrHtml = qr.createSvgTag({ cellSize: 5, margin: 2 });
+  } catch {
+    qrHtml = "";
+  }
+
+  openSheet(`
+    <h2>Invite Players</h2>
+    ${qrHtml ? `<div class="qr-wrap">${qrHtml}</div>` : ""}
+    <p class="code-display">${escapeHtml(code)}</p>
+    <p class="sheet-note">Scanning the code opens the game with the code already filled in. Or just share the code — friends can type it into Join Game.</p>
+    <div class="sheet-actions">
+      <button class="btn outline" id="btn-copy-code">Copy Code</button>
+      <button class="btn primary" id="btn-share-invite">Share</button>
+    </div>
+    <button class="btn outline" data-close style="margin-top:0.6rem;">Close</button>
+  `);
+
+  document.getElementById("btn-copy-code").onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+    } catch {
+      /* clipboard unavailable, ignore */
+    }
+  };
+  document.getElementById("btn-share-invite").onclick = async () => {
+    const text = `Join my poker game! Code: ${code}\n${joinUrl}`;
+    if (navigator.share) {
+      try {
+        await navigator.share({ text, url: joinUrl });
+      } catch {
+        /* user cancelled, ignore */
+      }
+    } else {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+}
+
+function openGameSettingsSheet() {
+  const game = state.game;
+  const players = state.players;
+  const chipsPerDollar = game.chipsPerDollar || null;
+  const currentChipValue = chipsPerDollar ? round2(game.defaultBuyIn * chipsPerDollar) : "";
+
+  openSheet(`
+    <h2>Game Settings</h2>
+    <label class="field-label" for="settings-name">Game name</label>
+    <input class="field" id="settings-name" type="text" maxlength="40" value="${escapeHtml(game.name)}" />
+    <label class="field-label" for="settings-buyin">Default buy-in ($)</label>
+    <input class="field" id="settings-buyin" type="number" inputmode="decimal" value="${game.defaultBuyIn}" min="0.01" step="0.01" />
+    <label class="field-label" for="settings-chipvalue">Chip value for that buy-in (optional)</label>
+    <input class="field" id="settings-chipvalue" type="number" inputmode="decimal" placeholder="e.g. 500" value="${currentChipValue}" min="0.01" step="0.01" />
+    <p class="sheet-note">This only affects buy-ins entered from now on — it won't change amounts already recorded.</p>
+    <p class="sheet-error" id="sheet-error"></p>
+    <div class="sheet-actions">
+      <button class="btn outline" data-close>Cancel</button>
+      <button class="btn primary" id="sheet-submit">Save</button>
+    </div>
+    ${
+      players.filter((p) => p.uid !== state.uid && !p.uid.startsWith("manual-")).length
+        ? `<button class="btn outline" id="btn-transfer-host" style="margin-top:1.4rem;">Transfer Host…</button>`
+        : ""
+    }
+    <button class="btn danger" id="btn-delete-game" style="margin-top:0.6rem;">Delete Game</button>
+  `);
+
+  document.getElementById("sheet-submit").onclick = async (e) => {
+    const errorEl = document.getElementById("sheet-error");
+    const name = document.getElementById("settings-name").value.trim().slice(0, 40);
+    const buyInRaw = document.getElementById("settings-buyin").value.trim();
+    const chipValueRaw = document.getElementById("settings-chipvalue").value.trim();
+
+    const defaultBuyIn = parseFloat(buyInRaw);
+    if (buyInRaw === "" || !isFinite(defaultBuyIn) || defaultBuyIn <= 0) {
+      errorEl.textContent = "Enter a valid buy-in amount greater than 0.";
+      return;
+    }
+    let newChipsPerDollar = null;
+    if (chipValueRaw !== "") {
+      const chipValue = parseFloat(chipValueRaw);
+      if (!isFinite(chipValue) || chipValue <= 0) {
+        errorEl.textContent = "Chip value must be a positive number.";
+        return;
+      }
+      if (chipValue === defaultBuyIn) {
+        errorEl.textContent = "Chip value is the same as the dollar buy-in, so there's nothing to convert.";
+        return;
+      }
+      newChipsPerDollar = chipValue / defaultBuyIn;
+    }
+
+    e.currentTarget.disabled = true;
+    try {
+      await updateGameSettings(state.code, {
+        name: name || "Poker Night",
+        defaultBuyIn,
+        chipsPerDollar: newChipsPerDollar,
+      });
+      logActivity(state.code, state.playerName, "Updated game settings").catch(() => {});
+      closeSheet();
+    } catch (err) {
+      errorEl.textContent = err.message;
+      e.currentTarget.disabled = false;
+    }
+  };
+
+  document.getElementById("btn-transfer-host")?.addEventListener("click", () => openTransferHostSheet(players));
+
+  document.getElementById("btn-delete-game").onclick = async () => {
+    if (
+      !confirm(
+        "Delete this game permanently? This removes all players and history for everyone. This cannot be undone."
+      )
+    ) {
+      return;
+    }
+    const code = state.code;
+    try {
+      await deleteGame(code);
+      if (getActiveCode() === code) clearActiveCode();
+      removeHistoryEntry(code);
+      detachGameListeners();
+      state.code = null;
+      state.game = null;
+      state.players = [];
+      state.activity = [];
+      state.showActivity = false;
+      state.showSettlement = false;
+      state.resumeCode = null;
+      closeSheet();
+      render();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+}
+
+function openTransferHostSheet(players) {
+  const others = players.filter((p) => p.uid !== state.uid && !p.uid.startsWith("manual-"));
+  openSheet(`
+    <h2>Transfer Host</h2>
+    <p class="sheet-note">Pick who takes over as host. You'll become a regular viewer.</p>
+    <div class="edit-item-list">
+      ${others.map((p) => `<button class="edit-item" data-uid="${p.uid}"><span>${escapeHtml(p.name)}</span></button>`).join("")}
+    </div>
+    <div class="sheet-actions">
+      <button class="btn outline" data-close>Cancel</button>
+    </div>
+  `);
+  document.querySelectorAll(".edit-item[data-uid]").forEach((btn) => {
+    btn.onclick = async () => {
+      const newHostUid = btn.dataset.uid;
+      const newHostName = others.find((p) => p.uid === newHostUid)?.name ?? "another player";
+      try {
+        await transferHost(state.code, newHostUid);
+        logActivity(state.code, state.playerName, `Transferred host to ${newHostName}`).catch(() => {});
+        closeSheet();
+      } catch (err) {
+        setError(err.message);
+      }
+    };
+  });
+}
+
 function openAddPlayerSheet() {
+  const inGameNames = new Set(state.players.map((p) => p.name.toLowerCase()));
+  const suggestions = loadSavedPlayerNames().filter((n) => !inGameNames.has(n.toLowerCase()));
+
   openSheet(`
     <h2>Add Player</h2>
+    ${
+      suggestions.length
+        ? `<label class="field-label">Regulars</label>
+           <div class="chip-row">
+             ${suggestions.map((n) => `<button class="name-chip" data-name="${escapeHtml(n)}">${escapeHtml(n)}</button>`).join("")}
+           </div>`
+        : ""
+    }
     <label class="field-label" for="sheet-player-name">Name</label>
     <input class="field" id="sheet-player-name" type="text" placeholder="e.g. Sam" maxlength="30" />
     <p class="sheet-note">They won't need the app — you'll record their buy-ins and cash-out for them, same as anyone else at the table.</p>
@@ -885,6 +1332,13 @@ function openAddPlayerSheet() {
       <button class="btn primary" id="sheet-submit">Add</button>
     </div>
   `);
+
+  document.querySelectorAll(".name-chip").forEach((chip) => {
+    chip.onclick = () => {
+      document.getElementById("sheet-player-name").value = chip.dataset.name;
+    };
+  });
+
   document.getElementById("sheet-submit").onclick = async (e) => {
     const errorEl = document.getElementById("sheet-error");
     const name = document.getElementById("sheet-player-name").value.trim();
@@ -895,6 +1349,8 @@ function openAddPlayerSheet() {
     e.currentTarget.disabled = true;
     try {
       await addManualPlayer(state.code, name, state.uid);
+      rememberPlayerName(name);
+      logActivity(state.code, state.playerName, `Added player "${name}"`).catch(() => {});
       closeSheet();
     } catch (err) {
       errorEl.textContent = err.message;
@@ -930,6 +1386,7 @@ function openBuyInSheet(player) {
     e.currentTarget.disabled = true;
     try {
       await addBuyIn(state.code, player.uid, amount);
+      logActivity(state.code, state.playerName, `Added a ${money(amount)} buy-in for ${player.name}`).catch(() => {});
       closeSheet();
     } catch (err) {
       document.getElementById("sheet-error").textContent = err.message;
@@ -967,6 +1424,7 @@ function openCashOutSheet(player) {
     e.currentTarget.disabled = true;
     try {
       await setCashOut(state.code, player.uid, amount);
+      logActivity(state.code, state.playerName, `Cashed out ${player.name} for ${money(amount)}`).catch(() => {});
       closeSheet();
     } catch (err) {
       document.getElementById("sheet-error").textContent = err.message;
@@ -1036,7 +1494,9 @@ function contentSheetItems(items, player) {
           }
           e.currentTarget.disabled = true;
           try {
+            const oldName = player.name;
             await renamePlayer(state.code, player.uid, newName);
+            logActivity(state.code, state.playerName, `Renamed "${oldName}" to "${newName}"`).catch(() => {});
             closeSheet();
           } catch (err) {
             errorEl.textContent = err.message;
@@ -1062,6 +1522,11 @@ function contentSheetItems(items, player) {
         e.currentTarget.disabled = true;
         try {
           await editPlayerEntry(state.code, player.uid, item.field, item.buyInId, newAmount);
+          logActivity(
+            state.code,
+            state.playerName,
+            `Corrected ${player.name}'s ${item.label.toLowerCase()} from ${item.display} to ${money(newAmount)}`
+          ).catch(() => {});
           closeSheet();
         } catch (err) {
           document.getElementById("sheet-error").textContent = err.message;
@@ -1117,6 +1582,7 @@ function renderSettlementOverlay() {
       </div>
 
       <div class="sheet-actions">
+        <button class="btn outline" id="settlement-share">Share Results</button>
         <button class="btn primary" id="settlement-done">Done</button>
       </div>
     </div>`;
@@ -1125,6 +1591,28 @@ function renderSettlementOverlay() {
     overlay.remove();
     state.showSettlement = false;
     leaveGame();
+  };
+  document.getElementById("settlement-share").onclick = async () => {
+    const lines = [
+      `${state.game.name} — results`,
+      ...sorted.map((p) => `${p.name}: ${moneySigned(netOf(p) ?? 0)}`),
+      "",
+      ...(transactions.length ? transactions.map((tx) => `${tx.from} → ${tx.to}: ${money(tx.amount)}`) : ["Everyone's settled up."]),
+    ];
+    const text = lines.join("\n");
+    if (navigator.share) {
+      try {
+        await navigator.share({ text });
+      } catch {
+        /* user cancelled, ignore */
+      }
+    } else {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        /* ignore */
+      }
+    }
   };
 }
 
@@ -1163,7 +1651,21 @@ function renderHistory() {
     return;
   }
 
+  const netEntries = entries.filter((e) => e.yourNet !== null && e.yourNet !== undefined);
+  const lifetimeNet = netEntries.reduce((sum, e) => sum + e.yourNet, 0);
+  const wins = netEntries.filter((e) => e.yourNet > 0).length;
+  const losses = netEntries.filter((e) => e.yourNet < 0).length;
+  const bestNight = netEntries.length ? Math.max(...netEntries.map((e) => e.yourNet)) : null;
+
   contentEl.innerHTML = `
+    <div class="section-label">Lifetime</div>
+    <div class="card-list">
+      <div class="pot-row"><span>Games played</span><span>${entries.length}</span></div>
+      <div class="pot-row"><span>Net result</span><span class="net ${lifetimeNet >= 0 ? "pos" : "neg"}">${moneySigned(lifetimeNet)}</span></div>
+      <div class="pot-row"><span>Record</span><span>${wins}W – ${losses}L</span></div>
+      ${bestNight !== null ? `<div class="pot-row"><span>Best night</span><span class="net pos">${moneySigned(bestNight)}</span></div>` : ""}
+    </div>
+
     <div class="section-label">History</div>
     <div class="card-list">
       ${entries
@@ -1221,6 +1723,13 @@ function closeSheet() {
 
 async function boot() {
   contentEl.innerHTML = `<div class="loading"><div class="spinner"></div><p>Connecting…</p></div>`;
+
+  const urlCode = new URLSearchParams(location.search).get("code");
+  if (urlCode) {
+    state.pendingJoinCode = urlCode.trim().toUpperCase();
+    history.replaceState(null, "", location.pathname);
+  }
+
   try {
     state.uid = await ensureSignedIn();
   } catch (err) {
