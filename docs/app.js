@@ -978,11 +978,19 @@ function renderRoom() {
         .join("")
     : `<p class="sheet-note" style="padding:0.85rem;">No activity yet.</p>`;
 
+  const totalPotDollars = players.reduce((sum, p) => sum + totalBuyIn(p), 0);
+
   contentEl.innerHTML = `
     <div class="room">
       <div class="game-status">
-        <span class="status-dot ${active ? "live" : ""}"></span>
-        ${active ? "Game in progress" : "Game ended"}${hostName ? ` · Hosted by ${escapeHtml(hostName)}` : ""}
+        <div class="game-status-left">
+          <span class="status-dot ${active ? "live" : ""}"></span>
+          ${active ? "Game in progress" : "Game ended"}${hostName ? ` · Hosted by ${escapeHtml(hostName)}` : ""}
+        </div>
+        <div class="pot-summary">
+          <span class="pot-summary-dollar">${money(totalPotDollars)}</span>
+          ${chipsPerDollar ? `<span class="pot-summary-chips">${Math.round(totalPotDollars * chipsPerDollar)} chips</span>` : ""}
+        </div>
       </div>
 
       <div class="section-label">Players (${players.length})</div>
