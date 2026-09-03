@@ -1,0 +1,32 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /games/{gameCode} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+                    && request.resource.data.hostId == request.auth.uid;
+      // Only the host can update the game doc (used to end the game).
+      allow update: if request.auth != null
+                    && request.auth.uid == resource.data.hostId;
+      allow delete: if false;
+
+      match /players/{playerId} {
+        allow read: if request.auth != null;
+        // You can join yourself, or the host can add anyone — including a
+        // player without their own device, under a generated ID.
+        allow create: if request.auth != null
+                      && (request.auth.uid == playerId
+                          || request.auth.uid == get(/databases/$(database)/documents/games/$(gameCode)).data.hostId);
+        // Only the host records buy-ins, cash-outs, and corrections.
+        allow update: if request.auth != null
+                      && request.auth.uid == get(/databases/$(database)/documents/games/$(gameCode)).data.hostId;
+        // Only the host can remove a player, and only before any money has
+        // actually been recorded for them.
+        allow delete: if request.auth != null
+                      && request.auth.uid == get(/databases/$(database)/documents/games/$(gameCode)).data.hostId
+                      && resource.data.buyIns.size() == 0
+                      && !('cashOut' in resource.data);
+      }
+    }
+  }
+}

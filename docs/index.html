@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<title>Poker Tracker</title>
+
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+<link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png" />
+<meta name="theme-color" content="#12332b" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Poker Tracker" />
+
+<style>
+  :root {
+    --felt: #12332b;
+    --brass: #c9a227;
+    --brass-soft: #e4c860;
+    --cream: #ede6d6;
+
+    --bg: #f2f2f7;
+    --card: #ffffff;
+    --text: #1c1c1e;
+    --secondary: #6e6e73;
+    --hairline: #e2e2e6;
+    --accent: #12332b;
+    --accent-tint: #e4ede9;
+    --gold: #a9791f;
+    --red: #d0362c;
+    --orange: #c9791f;
+    --blue: #2e7de0;
+    --green: #2f9e58;
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    overscroll-behavior-y: none;
+  }
+
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  /* ---------------- topbar ---------------- */
+
+  #topbar {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    background: var(--felt);
+    color: var(--cream);
+    padding: calc(0.6rem + env(safe-area-inset-top)) 0.9rem 0.6rem;
+  }
+
+  #topbar[hidden] { display: none; }
+
+  .icon-btn {
+    background: rgba(237, 230, 214, 0.12);
+    border: none;
+    color: var(--cream);
+    width: 2.2rem;
+    height: 2.2rem;
+    border-radius: 999px;
+    font-size: 1.1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .topbar-title { flex: 1; min-width: 0; }
+  .topbar-title .code-text {
+    display: block;
+    font-family: "SF Mono", Menlo, monospace;
+    font-weight: 700;
+    font-size: 1.05rem;
+    letter-spacing: 0.03em;
+  }
+  .topbar-name {
+    display: block;
+    font-size: 0.72rem;
+    color: rgba(237, 230, 214, 0.75);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .topbar-actions { display: flex; gap: 0.4rem; }
+
+  /* ---------------- content ---------------- */
+
+  #content {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 1.5rem;
+  }
+
+  .loading {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    color: var(--secondary);
+    padding: 0 2rem;
+    text-align: center;
+  }
+
+  .spinner {
+    width: 1.8rem;
+    height: 1.8rem;
+    border-radius: 50%;
+    border: 3px solid var(--hairline);
+    border-top-color: var(--felt);
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spinner, .sheet { animation: none; }
+    * { transition: none !important; }
+  }
+
+  .section-label {
+    padding: 1.1rem 1rem 0.4rem;
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--secondary);
+    font-weight: 700;
+  }
+
+  .card-list {
+    background: var(--card);
+    margin: 0 0.9rem;
+    border-radius: 0.8rem;
+    overflow: hidden;
+    box-shadow: 0 0 0 1px var(--hairline);
+  }
+
+  .row {
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    font: inherit;
+    color: inherit;
+    padding: 0.75rem 0.95rem;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .row:last-child { border-bottom: none; }
+
+  .row-main { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
+
+  .row.simple { display: flex; align-items: center; justify-content: space-between; }
+
+  .name-line { display: flex; align-items: center; gap: 0.4rem; }
+
+  .you-pill {
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--accent);
+    background: var(--accent-tint);
+    border-radius: 999px;
+    padding: 0.1rem 0.42rem;
+  }
+
+  .player-name { font-weight: 600; font-size: 0.94rem; }
+  .buyin-line { font-size: 0.78rem; color: var(--secondary); margin-top: 0.15rem; }
+
+  .net { font-weight: 700; font-variant-numeric: tabular-nums; font-size: 0.94rem; white-space: nowrap; }
+  .net.pos { color: var(--gold); }
+  .net.neg { color: var(--red); }
+  .net.pending { font-size: 0.76rem; font-weight: 600; color: var(--orange); }
+
+  .row-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+    flex-wrap: wrap;
+  }
+
+  .row-action-btn {
+    font-size: 0.76rem;
+    font-weight: 600;
+    padding: 0.4rem 0.7rem;
+    border-radius: 0.5rem;
+    border: none;
+    background: var(--accent-tint);
+    color: var(--accent);
+  }
+  .row-action-btn.ghost { background: var(--hairline); color: var(--text); }
+  .row-action-btn.danger { background: rgba(208, 54, 44, 0.12); color: var(--red); }
+
+  .game-status {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.9rem 1rem 0.2rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--secondary);
+  }
+  .status-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--secondary); }
+  .status-dot.live { background: var(--green); }
+
+  .tx-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.65rem 0.95rem;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 0.88rem;
+  }
+  .tx-row:last-child { border-bottom: none; }
+  .tx-name { font-weight: 600; }
+  .tx-arrow { color: var(--secondary); }
+  .tx-amount { margin-left: auto; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pot-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.7rem 0.95rem;
+    font-size: 0.86rem;
+    color: var(--secondary);
+  }
+
+  .hist-row {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+  }
+
+  /* ---------------- buttons & fields ---------------- */
+
+  .btn {
+    display: block;
+    width: calc(100% - 1.8rem);
+    margin: 0.6rem auto 0;
+    text-align: center;
+    font-weight: 600;
+    font-size: 0.94rem;
+    border-radius: 0.7rem;
+    padding: 0.8rem;
+    border: none;
+    font-family: inherit;
+  }
+  .btn.primary { background: var(--accent); color: var(--bg); }
+  .btn.secondary { background: transparent; color: var(--accent); border: 1.5px solid var(--accent); }
+  .btn.danger { background: transparent; color: var(--red); border: 1.5px solid var(--red); }
+  .btn.outline { background: transparent; color: var(--accent); border: 1.5px solid var(--hairline); }
+  .btn:disabled { opacity: 0.45; }
+
+  .hint { text-align: center; font-size: 0.72rem; color: var(--secondary); margin-top: 0.4rem; }
+
+  .field-label {
+    display: block;
+    font-size: 0.72rem;
+    color: var(--secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 1.1rem 0.9rem 0.35rem;
+  }
+  .field {
+    display: block;
+    width: calc(100% - 1.8rem);
+    margin: 0 auto;
+    background: var(--card);
+    border: 1px solid var(--hairline);
+    border-radius: 0.6rem;
+    padding: 0.65rem 0.8rem;
+    font-size: 0.94rem;
+    font-weight: 600;
+    font-family: inherit;
+    color: var(--text);
+  }
+  .field:focus { outline: 2px solid var(--brass); outline-offset: 1px; }
+
+  .error-text { color: var(--red); font-size: 0.82rem; padding: 0.5rem 0.9rem; margin: 0; }
+
+  /* ---------------- home ---------------- */
+
+  .home { padding-top: max(1.5rem, env(safe-area-inset-top)); }
+  .home-hero { text-align: center; padding: 0 1.5rem 0.5rem; }
+  .home-hero h1 { margin: 0; font-size: 1.55rem; }
+  .home-hero p { margin: 0.3rem 0 0; font-size: 0.86rem; color: var(--secondary); }
+  .home-actions { margin-top: 1.6rem; padding-bottom: 1rem; }
+
+  /* ---------------- tabbar ---------------- */
+
+  #tabbar {
+    flex-shrink: 0;
+    display: flex;
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(20px);
+    border-top: 1px solid var(--hairline);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .tab-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15rem;
+    background: none;
+    border: none;
+    font-family: inherit;
+    font-size: 0.68rem;
+    font-weight: 600;
+    color: var(--secondary);
+    padding: 0.5rem 0 0.4rem;
+  }
+  .tab-btn.active { color: var(--accent); }
+  .tab-icon { font-size: 1.15rem; }
+
+  /* ---------------- empty state ---------------- */
+
+  .empty-state {
+    height: 60vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.3rem;
+    text-align: center;
+    padding: 0 2rem;
+  }
+  .empty-title { font-weight: 700; font-size: 1rem; margin: 0; }
+  .empty-sub { color: var(--secondary); font-size: 0.86rem; margin: 0; }
+
+  /* ---------------- sheets / overlay ---------------- */
+
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(10, 20, 17, 0.45);
+    display: flex;
+    align-items: flex-end;
+    z-index: 20;
+  }
+
+  .sheet {
+    background: var(--bg);
+    width: 100%;
+    max-height: 88vh;
+    overflow-y: auto;
+    border-radius: 1.1rem 1.1rem 0 0;
+    padding: 1.1rem 0 calc(1.1rem + env(safe-area-inset-bottom));
+    animation: sheet-up 0.2s ease;
+  }
+
+  @keyframes sheet-up {
+    from { transform: translateY(16px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+
+  .sheet h2 {
+    margin: 0 0.95rem 0.2rem;
+    font-size: 1.05rem;
+  }
+
+  .sheet-note {
+    font-size: 0.78rem;
+    color: var(--secondary);
+    margin: 0.6rem 0.95rem 0;
+    line-height: 1.4;
+  }
+
+  .sheet-error {
+    color: var(--red);
+    font-size: 0.8rem;
+    margin: 0.5rem 0.95rem 0;
+    min-height: 1em;
+  }
+
+  .sheet-actions {
+    display: flex;
+    gap: 0.6rem;
+    margin: 1rem 0.95rem 0;
+  }
+  .sheet-actions .btn { width: 100%; margin: 0; }
+
+  .edit-item-list { margin: 0 0.95rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .edit-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--card);
+    border: 1px solid var(--hairline);
+    border-radius: 0.6rem;
+    padding: 0.7rem 0.85rem;
+    font: inherit;
+    color: inherit;
+  }
+  .edit-item-amount { color: var(--secondary); font-variant-numeric: tabular-nums; }
+
+  .amount-toggle {
+    display: flex;
+    gap: 0.4rem;
+    width: calc(100% - 1.8rem);
+    margin: 0 auto 0.5rem;
+  }
+  .amount-toggle-btn {
+    flex: 1;
+    padding: 0.45rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--hairline);
+    background: var(--card);
+    color: var(--secondary);
+    font: inherit;
+    font-weight: 600;
+    font-size: 0.82rem;
+  }
+  .amount-toggle-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+  }
+  .amount-readout {
+    width: calc(100% - 1.8rem);
+    margin: 0.4rem auto 0;
+    font-size: 0.8rem;
+    color: var(--secondary);
+    min-height: 1.1em;
+  }
+
+  .settlement-sheet { max-height: 92vh; }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div id="topbar" hidden></div>
+  <main id="content"></main>
+  <nav id="tabbar"></nav>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
