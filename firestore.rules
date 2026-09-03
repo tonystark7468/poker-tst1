@@ -8,7 +8,24 @@ service cloud.firestore {
       // Only the host can update the game doc (used to end the game).
       allow update: if request.auth != null
                     && request.auth.uid == resource.data.hostId;
-      allow delete: if false;
+      // Only the host can delete the game (used by the "Delete Game" cleanup
+      // action, which removes players/activity first, then the game doc).
+      allow delete: if request.auth != null
+                    && request.auth.uid == resource.data.hostId;
+
+      // A read-only, host-written record of what happened, for viewers who
+      // can watch the numbers change live but never cause a change
+      // themselves.
+      match /activity/{entryId} {
+        allow read: if request.auth != null;
+        allow create: if request.auth != null
+                      && request.auth.uid == get(/databases/$(database)/documents/games/$(gameCode)).data.hostId;
+        allow update: if false;
+        // Only the host can delete entries, and only as part of Delete Game
+        // cleanup (there's no per-entry delete UI).
+        allow delete: if request.auth != null
+                      && request.auth.uid == get(/databases/$(database)/documents/games/$(gameCode)).data.hostId;
+      }
 
       match /players/{playerId} {
         allow read: if request.auth != null;
@@ -20,12 +37,15 @@ service cloud.firestore {
         // Only the host records buy-ins, cash-outs, and corrections.
         allow update: if request.auth != null
                       && request.auth.uid == get(/databases/$(database)/documents/games/$(gameCode)).data.hostId;
-        // Only the host can remove a player, and only before any money has
-        // actually been recorded for them.
+        // Only the host can remove a player. There's no additional
+        // restriction beyond host-only here: the host can already edit or
+        // zero out any buy-in/cash-out via update, so delete adds no risk
+        // beyond what update already allows. (The "Delete Player" button
+        // still only appears in the UI for empty placeholders — that's
+        // accident prevention, not a security boundary. "Delete Game"
+        // needs to remove every player regardless of buy-ins.)
         allow delete: if request.auth != null
-                      && request.auth.uid == get(/databases/$(database)/documents/games/$(gameCode)).data.hostId
-                      && resource.data.buyIns.size() == 0
-                      && !('cashOut' in resource.data);
+                      && request.auth.uid == get(/databases/$(database)/documents/games/$(gameCode)).data.hostId;
       }
     }
   }
