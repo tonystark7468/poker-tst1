@@ -255,43 +255,6 @@ async function deleteGame(code) {
   await deleteDoc(gameRef(code));
 }
 
-async function startTimer(code, roundMinutes, startingSmallBlind) {
-  await updateDoc(gameRef(code), {
-    timerStartedAt: Timestamp.now(),
-    timerRoundMinutes: roundMinutes,
-    timerStartingSmallBlind: startingSmallBlind,
-  });
-}
-
-async function resetTimer(code) {
-  await updateDoc(gameRef(code), {
-    timerStartedAt: deleteField(),
-    timerRoundMinutes: deleteField(),
-    timerStartingSmallBlind: deleteField(),
-  });
-}
-
-// Derives the current round/blinds/countdown from a single timestamp field
-// instead of writing to Firestore every second — every device computes the
-// same answer locally from `timerStartedAt`, so this is just math, called
-// once a second by a local setInterval (see renderRoom).
-function computeTimerState(game) {
-  if (!game.timerStartedAt) return null;
-  const roundMs = (game.timerRoundMinutes || 15) * 60 * 1000;
-  const elapsed = Date.now() - game.timerStartedAt.toMillis();
-  const round = Math.max(0, Math.floor(elapsed / roundMs));
-  const remainingMs = roundMs - (elapsed - round * roundMs);
-  const smallBlind = (game.timerStartingSmallBlind || 25) * Math.pow(2, round);
-  return { round: round + 1, remainingMs, smallBlind, bigBlind: smallBlind * 2 };
-}
-
-function formatClock(ms) {
-  const totalSec = Math.max(0, Math.ceil(ms / 1000));
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
-
 // Applies a buy-in/cash-out correction to a player's raw Firestore data in
 // memory — shared by editPlayerEntry below.
 function computeUpdatedPlayerData(data, field, buyInId, newAmount) {
@@ -437,6 +400,20 @@ function escapeHtml(text) {
   div.textContent = text ?? "";
   return div.innerHTML;
 }
+
+// One of 5 chip-denomination colors, picked deterministically from the
+// player's uid so the same person always gets the same color across
+// renders and devices, without needing to store a color anywhere.
+function avatarColorVar(uid) {
+  let hash = 0;
+  for (let i = 0; i < uid.length; i++) hash = (hash * 31 + uid.charCodeAt(i)) >>> 0;
+  return `var(--chip-${(hash % 5) + 1})`;
+}
+function initials(name) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return (parts[0] || "?").slice(0, 2).toUpperCase();
+}
 function round2(n) {
   return Math.round(n * 100) / 100;
 }
@@ -546,7 +523,6 @@ const state = {
   historyEntries: [],
   historyDetail: null,
   showSettlement: false,
-  timerTickId: null,
 };
 
 const contentEl = document.getElementById("content");
@@ -615,8 +591,6 @@ function leaveGame() {
   const leavingCode = state.code;
   const wasActive = state.game?.status === "active";
   detachGameListeners();
-  clearInterval(state.timerTickId);
-  state.timerTickId = null;
   state.code = null;
   state.game = null;
   state.players = [];
@@ -922,7 +896,8 @@ function renderRoom() {
       return `
         <div class="row" data-uid="${p.uid}">
           <div class="row-main">
-            <div>
+            <div class="avatar" style="background:${avatarColorVar(p.uid)};">${initials(p.name)}</div>
+            <div class="row-info">
               <div class="name-line">
                 <span class="player-name">${escapeHtml(p.name)}</span>
                 ${p.uid === myUid ? '<span class="you-pill">you</span>' : ""}
@@ -946,23 +921,6 @@ function renderRoom() {
     .join("");
 
   const stillIn = players.filter((p) => !hasCashedOut(p));
-
-  const timerState = active ? computeTimerState(game) : null;
-  const timerHtml = !active
-    ? ""
-    : `
-      <div class="section-label">Blinds Timer</div>
-      <div class="timer-card">
-        ${
-          timerState
-            ? `<div class="timer-time" id="timer-clock">${formatClock(timerState.remainingMs)}</div>
-               <div class="timer-blinds" id="timer-blinds">Round ${timerState.round} · Blinds ${timerState.smallBlind}/${timerState.bigBlind}</div>
-               ${isHost ? `<button class="btn outline" id="btn-timer-reset">Reset Timer</button>` : ""}`
-            : isHost
-            ? `<button class="btn outline" id="btn-timer-start">Start Blinds Timer</button>`
-            : `<p class="hint">No timer running</p>`
-        }
-      </div>`;
 
   const activityHtml = state.activity.length
     ? state.activity
@@ -988,7 +946,7 @@ function renderRoom() {
           ${active ? "Game in progress" : "Game ended"}${hostName ? ` · Hosted by ${escapeHtml(hostName)}` : ""}
         </div>
         <div class="pot-summary">
-          <span class="pot-summary-dollar">${money(totalPotDollars)}</span>
+          <span class="pot-summary-dollar"><span class="chip-dot"></span>${money(totalPotDollars)}</span>
           ${chipsPerDollar ? `<span class="pot-summary-chips">${Math.round(totalPotDollars * chipsPerDollar)} chips</span>` : ""}
         </div>
       </div>
@@ -996,8 +954,6 @@ function renderRoom() {
       <div class="section-label">Players (${players.length})</div>
       ${isHost && active ? `<button class="btn outline" id="btn-add-player">+ Add Player</button>` : ""}
       <div class="card-list">${rowsHtml}</div>
-
-      ${timerHtml}
 
       <button class="btn outline activity-toggle-btn" id="btn-toggle-activity" type="button">
         Activity (${state.activity.length}) ${state.showActivity ? "▴" : "▾"}
@@ -1088,73 +1044,9 @@ function renderRoom() {
     render();
   });
 
-  document.getElementById("btn-timer-start")?.addEventListener("click", openTimerSheet);
-  document.getElementById("btn-timer-reset")?.addEventListener("click", () => {
-    if (!confirm("Reset the blinds timer?")) return;
-    const code = state.code;
-    resetTimer(code)
-      .then(() => logActivity(code, state.playerName, "Reset the blinds timer"))
-      .catch((err) => setError(err.message));
-  });
-
-  clearInterval(state.timerTickId);
-  state.timerTickId = null;
-  if (active && game.timerStartedAt) {
-    state.timerTickId = setInterval(() => {
-      const ts = computeTimerState(state.game);
-      const clockEl = document.getElementById("timer-clock");
-      const blindsEl = document.getElementById("timer-blinds");
-      if (!ts || !clockEl) {
-        clearInterval(state.timerTickId);
-        state.timerTickId = null;
-        return;
-      }
-      clockEl.textContent = formatClock(ts.remainingMs);
-      if (blindsEl) blindsEl.textContent = `Round ${ts.round} · Blinds ${ts.smallBlind}/${ts.bigBlind}`;
-    }, 1000);
-  }
-
   if (state.showSettlement && !document.getElementById("settlement-overlay")) {
     renderSettlementOverlay();
   }
-}
-
-function openTimerSheet() {
-  openSheet(`
-    <h2>Start Blinds Timer</h2>
-    <label class="field-label" for="timer-minutes">Minutes per round</label>
-    <input class="field" id="timer-minutes" type="number" inputmode="numeric" value="15" min="1" step="1" />
-    <label class="field-label" for="timer-blind">Starting small blind</label>
-    <input class="field" id="timer-blind" type="number" inputmode="numeric" value="25" min="1" step="1" />
-    <p class="sheet-note">Blinds double each round. Everyone at the table sees the same live countdown.</p>
-    <p class="sheet-error" id="sheet-error"></p>
-    <div class="sheet-actions">
-      <button class="btn outline" data-close>Cancel</button>
-      <button class="btn primary" id="sheet-submit">Start</button>
-    </div>
-  `);
-  document.getElementById("sheet-submit").onclick = async (e) => {
-    const errorEl = document.getElementById("sheet-error");
-    const minutes = parseInt(document.getElementById("timer-minutes").value, 10);
-    const smallBlind = parseInt(document.getElementById("timer-blind").value, 10);
-    if (!isFinite(minutes) || minutes <= 0) {
-      errorEl.textContent = "Enter a valid number of minutes.";
-      return;
-    }
-    if (!isFinite(smallBlind) || smallBlind <= 0) {
-      errorEl.textContent = "Enter a valid starting small blind.";
-      return;
-    }
-    e.currentTarget.disabled = true;
-    try {
-      await startTimer(state.code, minutes, smallBlind);
-      logActivity(state.code, state.playerName, "Started the blinds timer").catch(() => {});
-      closeSheet();
-    } catch (err) {
-      errorEl.textContent = err.message;
-      e.currentTarget.disabled = false;
-    }
-  };
 }
 
 function openInviteSheet() {
