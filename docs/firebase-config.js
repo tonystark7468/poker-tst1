@@ -1,12 +1,9 @@
-// Config for the "poker-game-b6ffb" Firebase project.
-// (These values aren't secret the way an API key normally is — Firebase web
-// config is meant to be public; your Firestore security rules are what
-// actually protect the data.)
+// Config for the "poker-test-1-834c2" Firebase project.
 export const firebaseConfig = {
-  apiKey: "AIzaSyCVUmGi2KoPy-VTDCkbWkO1TVXgBQSicdU",
-  authDomain: "poker-game-b6ffb.firebaseapp.com",
-  projectId: "poker-game-b6ffb",
-  storageBucket: "poker-game-b6ffb.firebasestorage.app",
-  messagingSenderId: "265744685162",
-  appId: "1:265744685162:web:f85fa6f997325408d51213",
+  apiKey: "AIzaSyC1•••••••••••••••••••••••••••••••",
+  authDomain: "poker-test-1-834c2.firebaseapp.com",
+  projectId: "poker-test-1-834c2",
+  storageBucket: "poker-test-1-834c2.firebasestorage.app",
+  messagingSenderId: "1053051443453",
+  appId: "1:1053051443453:web:ac637c187ad2c32d0e4694",
 };
