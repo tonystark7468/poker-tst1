@@ -909,7 +909,9 @@ function renderRoom() {
           ${
             active && isHost
               ? `<div class="row-actions">
-                   <button class="row-action-btn" data-action="buyin" data-uid="${p.uid}">+ Buy-in</button>
+                   <button class="row-action-btn" data-action="buyin" data-uid="${p.uid}">${
+                     p.buyIns.length > 0 ? "↻ Rebuy" : "+ Buy-in"
+                   }</button>
                    ${!hasCashedOut(p) ? `<button class="row-action-btn" data-action="cashout" data-uid="${p.uid}">✓ Cash out</button>` : ""}
                    <button class="row-action-btn ghost" data-action="edit" data-uid="${p.uid}">✎ Edit</button>
                    ${deletable ? `<button class="row-action-btn danger" data-action="delete" data-uid="${p.uid}">🗑 Delete</button>` : ""}
@@ -921,6 +923,10 @@ function renderRoom() {
     .join("");
 
   const stillIn = players.filter((p) => !hasCashedOut(p));
+  const readyToEnd = active && stillIn.length === 0;
+  const totalPotDollars = players.reduce((sum, p) => sum + totalBuyIn(p), 0);
+  const totalCashOutSoFar = players.reduce((sum, p) => sum + (p.cashOut ?? 0), 0);
+  const liveDiscrepancy = round2(totalCashOutSoFar - totalPotDollars);
 
   const activityHtml = state.activity.length
     ? state.activity
@@ -935,8 +941,6 @@ function renderRoom() {
         )
         .join("")
     : `<p class="sheet-note" style="padding:0.85rem;">No activity yet.</p>`;
-
-  const totalPotDollars = players.reduce((sum, p) => sum + totalBuyIn(p), 0);
 
   contentEl.innerHTML = `
     <div class="room">
@@ -961,6 +965,13 @@ function renderRoom() {
       ${state.showActivity ? `<div class="card-list">${activityHtml}</div>` : ""}
 
       ${state.error ? `<p class="error-text">${escapeHtml(state.error)}</p>` : ""}
+
+      ${
+        readyToEnd && Math.abs(liveDiscrepancy) > 0.01
+          ? `<div class="discrepancy-banner">⚠ Off by ${money(Math.abs(liveDiscrepancy))} — ${money(totalPotDollars)} bought in vs
+             ${money(totalCashOutSoFar)} cashed out. Double-check before ending.</div>`
+          : ""
+      }
 
       ${
         isHost && active
@@ -1007,16 +1018,13 @@ function renderRoom() {
     // if it doesn't, a cash-out was probably mistyped. This is a warning,
     // not a block: the host can still end anyway and fix it later (Edit,
     // or Reopen Game once ended), since sometimes the "mistake" is real
-    // and everyone at the table already agreed to eat it.
-    const totalBuyInAll = players.reduce((sum, p) => sum + totalBuyIn(p), 0);
-    const totalCashOutAll = players.reduce((sum, p) => sum + (p.cashOut ?? 0), 0);
-    const diff = round2(totalCashOutAll - totalBuyInAll);
-
+    // and everyone at the table already agreed to eat it. Same numbers as
+    // the discrepancy banner above, computed once in renderRoom.
     const message =
-      Math.abs(diff) > 0.01
-        ? `Buy-ins and cash-outs don't match: ${money(totalBuyInAll)} bought in vs ${money(
-            totalCashOutAll
-          )} cashed out (off by ${money(Math.abs(diff))}). That usually means a cash-out was mistyped — tap Cancel to go fix it with Edit, or OK to end anyway.\n\nEnd the game for everyone?`
+      Math.abs(liveDiscrepancy) > 0.01
+        ? `Buy-ins and cash-outs don't match: ${money(totalPotDollars)} bought in vs ${money(
+            totalCashOutSoFar
+          )} cashed out (off by ${money(Math.abs(liveDiscrepancy))}). That usually means a cash-out was mistyped — tap Cancel to go fix it with Edit, or OK to end anyway.\n\nEnd the game for everyone?`
         : "End the game for everyone? This locks in all buy-ins and cash-outs.";
 
     if (confirm(message)) {
@@ -1235,9 +1243,20 @@ function openAddPlayerSheet() {
     ${
       suggestions.length
         ? `<label class="field-label">Regulars</label>
-           <div class="chip-row">
-             ${suggestions.map((n) => `<button class="name-chip" data-name="${escapeHtml(n)}">${escapeHtml(n)}</button>`).join("")}
-           </div>`
+           <div class="regular-list">
+             ${suggestions
+               .map(
+                 (n) => `
+               <label class="regular-item">
+                 <input type="checkbox" class="regular-check" value="${escapeHtml(n)}" />
+                 <span class="avatar" style="background:${avatarColorVar(n)};">${initials(n)}</span>
+                 <span class="player-name">${escapeHtml(n)}</span>
+               </label>`
+               )
+               .join("")}
+           </div>
+           <button class="btn outline" id="btn-add-regulars" disabled>Add 0 to table</button>
+           <label class="field-label">Or add someone new</label>`
         : ""
     }
     <label class="field-label" for="sheet-player-name">Name</label>
@@ -1250,10 +1269,32 @@ function openAddPlayerSheet() {
     </div>
   `);
 
-  document.querySelectorAll(".name-chip").forEach((chip) => {
-    chip.onclick = () => {
-      document.getElementById("sheet-player-name").value = chip.dataset.name;
+  const regularsBtn = document.getElementById("btn-add-regulars");
+  const checkedNames = () => [...document.querySelectorAll(".regular-check:checked")].map((c) => c.value);
+
+  document.querySelectorAll(".regular-check").forEach((box) => {
+    box.onchange = () => {
+      const n = checkedNames().length;
+      regularsBtn.textContent = `Add ${n} to table`;
+      regularsBtn.disabled = n === 0;
     };
+  });
+
+  regularsBtn?.addEventListener("click", async (e) => {
+    const errorEl = document.getElementById("sheet-error");
+    const names = checkedNames();
+    e.currentTarget.disabled = true;
+    try {
+      for (const name of names) {
+        await addManualPlayer(state.code, name, state.uid);
+        rememberPlayerName(name);
+        logActivity(state.code, state.playerName, `Added player "${name}"`).catch(() => {});
+      }
+      closeSheet();
+    } catch (err) {
+      errorEl.textContent = err.message;
+      e.currentTarget.disabled = false;
+    }
   });
 
   document.getElementById("sheet-submit").onclick = async (e) => {
@@ -1279,8 +1320,10 @@ function openAddPlayerSheet() {
 function openBuyInSheet(player) {
   const defaultAmount = state.game.defaultBuyIn;
   const chipsPerDollar = state.game.chipsPerDollar || null;
+  const isRebuy = player.buyIns.length > 0;
+  const label = isRebuy ? "rebuy" : "buy-in";
   openSheet(`
-    <h2>Add buy-in for ${escapeHtml(player.name)}</h2>
+    <h2>Add ${label} for ${escapeHtml(player.name)}</h2>
     <label class="field-label">${chipsPerDollar ? "Chips or $" : "Amount"}</label>
     <div id="amount-input"></div>
     <p class="sheet-error" id="sheet-error"></p>
@@ -1303,7 +1346,7 @@ function openBuyInSheet(player) {
     e.currentTarget.disabled = true;
     try {
       await addBuyIn(state.code, player.uid, amount);
-      logActivity(state.code, state.playerName, `Added a ${money(amount)} buy-in for ${player.name}`).catch(() => {});
+      logActivity(state.code, state.playerName, `Added a ${money(amount)} ${label} for ${player.name}`).catch(() => {});
       closeSheet();
     } catch (err) {
       document.getElementById("sheet-error").textContent = err.message;
