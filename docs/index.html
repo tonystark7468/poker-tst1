@@ -393,6 +393,17 @@
 
   .error-text { color: var(--red); font-size: 0.82rem; padding: 0.5rem 0.9rem; margin: 0; }
 
+  .discrepancy-banner {
+    margin: 0.9rem 0.9rem 0;
+    padding: 0.7rem 0.85rem;
+    border-radius: 0.7rem;
+    background: rgba(209, 104, 90, 0.12);
+    border: 1px solid rgba(209, 104, 90, 0.35);
+    color: var(--cream);
+    font-size: 0.8rem;
+    line-height: 1.4;
+  }
+
   /* ---------------- home ---------------- */
 
   .home { padding-top: max(1.5rem, env(safe-area-inset-top)); }
@@ -577,21 +588,18 @@
 
   /* ---------------- saved regulars ---------------- */
 
-  .chip-row {
+  .regular-list { margin: 0 0.95rem; display: flex; flex-direction: column; gap: 0.4rem; }
+  .regular-item {
     display: flex;
-    flex-wrap: wrap;
-    gap: 0.4rem;
-    margin: 0 0.95rem;
-  }
-  .name-chip {
-    font-size: 0.82rem;
-    font-weight: 600;
-    padding: 0.4rem 0.75rem;
-    border-radius: 999px;
-    border: 1px solid var(--hairline);
+    align-items: center;
+    gap: 0.6rem;
     background: var(--card);
-    color: var(--accent);
+    border: 1px solid var(--hairline);
+    border-radius: 0.6rem;
+    padding: 0.55rem 0.75rem;
   }
+  .regular-item .avatar { width: 1.9rem; height: 1.9rem; font-size: 0.7rem; }
+  .regular-check { width: 1.1rem; height: 1.1rem; accent-color: var(--brass); flex-shrink: 0; }
 
   /* ---------------- activity log ---------------- */
 
