@@ -892,6 +892,7 @@ function renderRoom() {
           ? `<span class="net pending">In play</span>`
           : `<span class="net ${net >= 0 ? "pos" : "neg"}">${moneySigned(net)}</span>`;
       const chipsNote = chipsPerDollar ? ` · ${Math.round(totalBuyIn(p) * chipsPerDollar)} chips` : "";
+      const cashOutChipsNote = chipsPerDollar ? ` · ${Math.round(p.cashOut * chipsPerDollar)} chips` : "";
       const deletable = active && isHost && p.buyIns.length === 0 && !hasCashedOut(p);
       return `
         <div class="row" data-uid="${p.uid}">
@@ -903,6 +904,7 @@ function renderRoom() {
                 ${p.uid === myUid ? '<span class="you-pill">you</span>' : ""}
               </div>
               <div class="buyin-line">Buy-in: ${money(totalBuyIn(p))}${chipsNote}</div>
+              ${hasCashedOut(p) ? `<div class="buyin-line">Cash-out: ${money(p.cashOut)}${cashOutChipsNote}</div>` : ""}
             </div>
             ${netHtml}
           </div>
