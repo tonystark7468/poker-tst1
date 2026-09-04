@@ -218,8 +218,15 @@ async function addBuyIn(code, uid, amount) {
   });
 }
 
-async function setCashOut(code, uid, amount) {
-  await updateDoc(playerRef(code, uid), { cashOut: amount });
+// Itemized, like addBuyIn — a player can cash out, rebuy, and cash out
+// again as many times as the night calls for. (Existing games created
+// before this field existed may still carry a single legacy `cashOut`
+// scalar; the read-side helpers below account for it alongside this
+// array so old data keeps working without a migration.)
+async function addCashOut(code, uid, amount) {
+  await updateDoc(playerRef(code, uid), {
+    cashOuts: arrayUnion({ id: crypto.randomUUID(), amount, timestamp: Timestamp.now() }),
+  });
 }
 
 async function endGame(code) {
@@ -256,14 +263,23 @@ async function deleteGame(code) {
 }
 
 // Applies a buy-in/cash-out correction to a player's raw Firestore data in
-// memory — shared by editPlayerEntry below.
-function computeUpdatedPlayerData(data, field, buyInId, newAmount) {
+// memory — shared by editPlayerEntry below. `field` also handles the
+// legacy single-scalar cash-out from games created before cash-outs were
+// itemized (see addCashOut above).
+function computeUpdatedPlayerData(data, field, entryId, newAmount) {
   const updated = { ...data };
-  if (field === "cashOut") {
+  if (field === "cashOutLegacy") {
     updated.cashOut = newAmount;
+  } else if (field === "cashOut") {
+    const cashOuts = [...(data.cashOuts || [])];
+    const idx = cashOuts.findIndex((c) => c.id === entryId);
+    if (idx !== -1) {
+      cashOuts[idx] = { ...cashOuts[idx], amount: newAmount };
+    }
+    updated.cashOuts = cashOuts;
   } else {
     const buyIns = [...(data.buyIns || [])];
-    const idx = buyIns.findIndex((b) => b.id === buyInId);
+    const idx = buyIns.findIndex((b) => b.id === entryId);
     if (idx !== -1) {
       buyIns[idx] = { ...buyIns[idx], amount: newAmount };
     }
@@ -292,11 +308,18 @@ async function editPlayerEntry(code, playerUid, field, buyInId, newAmount) {
 function totalBuyIn(player) {
   return (player.buyIns || []).reduce((sum, b) => sum + b.amount, 0);
 }
+// Sums itemized cash-outs, plus the legacy single-scalar cashOut field a
+// player doc created before cash-outs were itemized may still carry.
+function totalCashOut(player) {
+  const itemized = (player.cashOuts || []).reduce((sum, c) => sum + c.amount, 0);
+  const legacy = typeof player.cashOut === "number" ? player.cashOut : 0;
+  return itemized + legacy;
+}
 function hasCashedOut(player) {
-  return player.cashOut !== undefined && player.cashOut !== null;
+  return (player.cashOuts && player.cashOuts.length > 0) || (player.cashOut !== undefined && player.cashOut !== null);
 }
 function netOf(player) {
-  return hasCashedOut(player) ? player.cashOut - totalBuyIn(player) : null;
+  return hasCashedOut(player) ? totalCashOut(player) - totalBuyIn(player) : null;
 }
 
 // ---------------------------------------------------------------------
@@ -608,7 +631,7 @@ function saveHistorySnapshot(game) {
     uid: p.uid,
     name: p.name,
     totalBuyIn: totalBuyIn(p),
-    cashOut: p.cashOut ?? null,
+    cashOut: hasCashedOut(p) ? totalCashOut(p) : null,
     net: netOf(p),
   }));
   const mine = results.find((r) => r.uid === state.uid);
@@ -892,7 +915,8 @@ function renderRoom() {
           ? `<span class="net pending">In play</span>`
           : `<span class="net ${net >= 0 ? "pos" : "neg"}">${moneySigned(net)}</span>`;
       const chipsNote = chipsPerDollar ? ` · ${Math.round(totalBuyIn(p) * chipsPerDollar)} chips` : "";
-      const cashOutChipsNote = chipsPerDollar ? ` · ${Math.round(p.cashOut * chipsPerDollar)} chips` : "";
+      const cashOutTotal = totalCashOut(p);
+      const cashOutChipsNote = chipsPerDollar ? ` · ${Math.round(cashOutTotal * chipsPerDollar)} chips` : "";
       const deletable = active && isHost && p.buyIns.length === 0 && !hasCashedOut(p);
       return `
         <div class="row" data-uid="${p.uid}">
@@ -904,7 +928,7 @@ function renderRoom() {
                 ${p.uid === myUid ? '<span class="you-pill">you</span>' : ""}
               </div>
               <div class="buyin-line">Buy-in: ${money(totalBuyIn(p))}${chipsNote}</div>
-              ${hasCashedOut(p) ? `<div class="buyin-line">Cash-out: ${money(p.cashOut)}${cashOutChipsNote}</div>` : ""}
+              ${hasCashedOut(p) ? `<div class="buyin-line">Cash-out: ${money(cashOutTotal)}${cashOutChipsNote}</div>` : ""}
             </div>
             ${netHtml}
           </div>
@@ -914,7 +938,7 @@ function renderRoom() {
                    <button class="row-action-btn" data-action="buyin" data-uid="${p.uid}">${
                      p.buyIns.length > 0 ? "↻ Rebuy" : "+ Buy-in"
                    }</button>
-                   ${!hasCashedOut(p) ? `<button class="row-action-btn" data-action="cashout" data-uid="${p.uid}">✓ Cash out</button>` : ""}
+                   <button class="row-action-btn" data-action="cashout" data-uid="${p.uid}">✓ Cash out</button>
                    <button class="row-action-btn ghost" data-action="edit" data-uid="${p.uid}">✎ Edit</button>
                    ${deletable ? `<button class="row-action-btn danger" data-action="delete" data-uid="${p.uid}">🗑 Delete</button>` : ""}
                  </div>`
@@ -924,10 +948,15 @@ function renderRoom() {
     })
     .join("");
 
+  // "Hasn't cashed out even once" is only a heuristic now that cash-outs
+  // are itemized (someone can cash out, rebuy, and be holding live chips
+  // again) — it's just used to decide when the discrepancy nudge below is
+  // worth showing, not to block End Game, which always runs the same
+  // check itself at the moment it's actually clicked.
   const stillIn = players.filter((p) => !hasCashedOut(p));
   const readyToEnd = active && stillIn.length === 0;
   const totalPotDollars = players.reduce((sum, p) => sum + totalBuyIn(p), 0);
-  const totalCashOutSoFar = players.reduce((sum, p) => sum + (p.cashOut ?? 0), 0);
+  const totalCashOutSoFar = players.reduce((sum, p) => sum + totalCashOut(p), 0);
   const liveDiscrepancy = round2(totalCashOutSoFar - totalPotDollars);
 
   const activityHtml = state.activity.length
@@ -978,7 +1007,7 @@ function renderRoom() {
       ${
         isHost && active
           ? `<button class="btn danger" id="btn-end">End Game &amp; Settle Up</button>
-             <p class="hint">Enabled once everyone has cashed out</p>`
+             <p class="hint">Warns first if buy-ins and cash-outs don't match</p>`
           : ""
       }
       ${!active ? `<button class="btn primary" id="btn-view-settlement">View Settlement</button>` : ""}
@@ -1011,11 +1040,6 @@ function renderRoom() {
   document.getElementById("btn-add-player")?.addEventListener("click", openAddPlayerSheet);
 
   document.getElementById("btn-end")?.addEventListener("click", () => {
-    if (stillIn.length > 0) {
-      setError(`Still in play: ${stillIn.map((p) => p.name).join(", ")}`);
-      return;
-    }
-
     // Every dollar bought in should come back out as somebody's cash-out —
     // if it doesn't, a cash-out was probably mistyped. This is a warning,
     // not a block: the host can still end anyway and fix it later (Edit,
@@ -1361,11 +1385,9 @@ function openCashOutSheet(player) {
   const chipsPerDollar = state.game.chipsPerDollar || null;
   openSheet(`
     <h2>Cash out ${escapeHtml(player.name)}</h2>
-    <label class="field-label">${chipsPerDollar ? "Final chip count" : "Final amount"}</label>
+    <label class="field-label">${chipsPerDollar ? "Chip count" : "Amount"}</label>
     <div id="amount-input"></div>
-    <p class="sheet-note">Enter the total ${
-      chipsPerDollar ? "chips" : "value"
-    } they're cashing out with, not the profit or loss.</p>
+    <p class="sheet-note">Enter what they're taking off the table right now. If they buy back in later, cash them out again the same way.</p>
     <p class="sheet-error" id="sheet-error"></p>
     <div class="sheet-actions">
       <button class="btn outline" data-close>Cancel</button>
@@ -1385,7 +1407,7 @@ function openCashOutSheet(player) {
     }
     e.currentTarget.disabled = true;
     try {
-      await setCashOut(state.code, player.uid, amount);
+      await addCashOut(state.code, player.uid, amount);
       logActivity(state.code, state.playerName, `Cashed out ${player.name} for ${money(amount)}`).catch(() => {});
       closeSheet();
     } catch (err) {
@@ -1399,8 +1421,17 @@ function openEditSheet(player) {
   const items = [
     { label: "Name", display: player.name, field: "name", buyInId: null },
     ...player.buyIns.map((b) => ({ label: "Buy-in", display: money(b.amount), amount: b.amount, field: "buyIn", buyInId: b.id })),
-    ...(hasCashedOut(player)
-      ? [{ label: "Cash-out", display: money(player.cashOut), amount: player.cashOut, field: "cashOut", buyInId: null }]
+    ...(player.cashOuts || []).map((c) => ({
+      label: "Cash-out",
+      display: money(c.amount),
+      amount: c.amount,
+      field: "cashOut",
+      buyInId: c.id,
+    })),
+    // A game created before cash-outs were itemized may still carry this
+    // single legacy value alongside (or instead of) the array above.
+    ...(typeof player.cashOut === "number"
+      ? [{ label: "Cash-out", display: money(player.cashOut), amount: player.cashOut, field: "cashOutLegacy", buyInId: null }]
       : []),
   ];
 
@@ -1503,8 +1534,8 @@ function renderSettlementOverlay() {
   const players = state.players;
   const transactions = calculateSettlement(players);
   const totalPot = players.reduce((sum, p) => sum + totalBuyIn(p), 0);
-  const totalCashOut = players.reduce((sum, p) => sum + (p.cashOut ?? 0), 0);
-  const discrepancy = round2(totalCashOut - totalPot);
+  const totalCashedOut = players.reduce((sum, p) => sum + totalCashOut(p), 0);
+  const discrepancy = round2(totalCashedOut - totalPot);
   const sorted = [...players].sort((a, b) => (netOf(b) ?? 0) - (netOf(a) ?? 0));
 
   const overlay = document.createElement("div");
