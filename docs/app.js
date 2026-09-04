@@ -450,8 +450,16 @@ function round2(n) {
 function mountAmountInput(container, { chipsPerDollar, initialDollars = "", idPrefix = "amt" }) {
   const dollarId = `${idPrefix}-dollars`;
 
+  // Ground the placeholder example in this game's actual buy-in — set
+  // once, when the host created it — instead of a generic made-up number,
+  // so it reads as "e.g. 1000" on a game where that's the real scale
+  // instead of an unrelated "e.g. 500".
+  const refDollars = state.game?.defaultBuyIn;
+  const dollarPlaceholder = refDollars ? `e.g. ${refDollars}` : "";
+  const chipPlaceholder = refDollars && chipsPerDollar ? `e.g. ${Math.round(refDollars * chipsPerDollar)}` : "e.g. 500";
+
   if (!chipsPerDollar) {
-    container.innerHTML = `<input class="field" id="${dollarId}" type="number" inputmode="decimal" value="${initialDollars}" min="0" />`;
+    container.innerHTML = `<input class="field" id="${dollarId}" type="number" inputmode="decimal" value="${initialDollars}" min="0" placeholder="${dollarPlaceholder}" />`;
     return { getAmount: () => parseFloat(document.getElementById(dollarId).value) };
   }
 
@@ -466,8 +474,8 @@ function mountAmountInput(container, { chipsPerDollar, initialDollars = "", idPr
       <button type="button" class="amount-toggle-btn active" data-mode="chips">Chips</button>
       <button type="button" class="amount-toggle-btn" data-mode="dollars">$</button>
     </div>
-    <input class="field" id="${chipId}" type="number" inputmode="decimal" value="${initialChips}" min="0" placeholder="e.g. 500" />
-    <input class="field" id="${dollarId}" type="number" inputmode="decimal" value="${initialDollars}" min="0" hidden />
+    <input class="field" id="${chipId}" type="number" inputmode="decimal" value="${initialChips}" min="0" placeholder="${chipPlaceholder}" />
+    <input class="field" id="${dollarId}" type="number" inputmode="decimal" value="${initialDollars}" min="0" hidden placeholder="${dollarPlaceholder}" />
     <p class="amount-readout" id="${readoutId}"></p>
   `;
 
@@ -802,12 +810,12 @@ function openHostSheet() {
     <label class="field-label" for="sheet-game-name">Game name (optional)</label>
     <input class="field" id="sheet-game-name" type="text" placeholder="Friday Night Poker" maxlength="40" />
     <label class="field-label" for="sheet-buyin">Default buy-in ($)</label>
-    <input class="field" id="sheet-buyin" type="number" inputmode="decimal" value="${escapeHtml(lastBuyIn)}" min="0.01" step="0.01" />
-    <label class="field-label" for="sheet-chipvalue">Chip value for that buy-in (optional)</label>
+    <input class="field" id="sheet-buyin" type="number" inputmode="decimal" placeholder="e.g. 20" value="${escapeHtml(lastBuyIn)}" min="0.01" step="0.01" />
+    <label class="field-label" for="sheet-chipvalue">Chip value for that buy-in</label>
     <input class="field" id="sheet-chipvalue" type="number" inputmode="decimal" placeholder="e.g. 500" value="${escapeHtml(
       lastChipValue
     )}" min="0.01" step="0.01" />
-    <p class="sheet-note">If a buy-in hands out chips labeled in a different number (like a stack marked "500" for a $20 buy-in), enter that number here — everyone can then enter chip counts at cash-out instead of doing the math. Leave blank to just use dollars. Remembered for next time either way.</p>
+    <p class="sheet-note">If a buy-in hands out chips labeled in a different number (like a stack marked "500" for a $20 buy-in), enter that number here — everyone then enters chip counts at buy-in and cash-out instead of doing the math. Remembered for next time.</p>
     <p class="sheet-error" id="sheet-error"></p>
     <div class="sheet-actions">
       <button class="btn outline" data-close>Cancel</button>
@@ -829,31 +837,22 @@ function openHostSheet() {
       return;
     }
 
-    let chipsPerDollar = null;
-    let chipValue = null;
-    if (chipValueRaw !== "") {
-      chipValue = parseFloat(chipValueRaw);
-      if (!isFinite(chipValue) || chipValue <= 0) {
-        errorEl.textContent = "Chip value must be a positive number.";
-        return;
-      }
-      if (chipValue === defaultBuyIn) {
-        errorEl.textContent =
-          "Chip value is the same as the dollar buy-in, so there's nothing to convert — leave it blank instead, or enter the actual chip number if it's different.";
-        return;
-      }
-      chipsPerDollar = chipValue / defaultBuyIn;
+    if (chipValueRaw === "") {
+      errorEl.textContent = "Enter the chip value for that buy-in.";
+      return;
     }
+    const chipValue = parseFloat(chipValueRaw);
+    if (!isFinite(chipValue) || chipValue <= 0) {
+      errorEl.textContent = "Chip value must be a positive number.";
+      return;
+    }
+    const chipsPerDollar = chipValue / defaultBuyIn;
 
     button.disabled = true;
     try {
       const game = await createGame(name, state.uid, state.playerName, defaultBuyIn, chipsPerDollar);
       localStorage.setItem(LAST_BUYIN_KEY, String(defaultBuyIn));
-      if (chipValue) {
-        localStorage.setItem(LAST_CHIPVALUE_KEY, String(chipValue));
-      } else {
-        localStorage.removeItem(LAST_CHIPVALUE_KEY);
-      }
+      localStorage.setItem(LAST_CHIPVALUE_KEY, String(chipValue));
       closeSheet();
       enterGame(game.code);
     } catch (err) {
